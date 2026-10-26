@@ -125,7 +125,7 @@ export function addTakeToProject(project: Project, take: ProjectTake): Project {
     id: 'clip_take_' + take.id,
     trackId: 'tr_artist',
     name: take.title,
-    type: 'video',
+    type: take.id.startsWith('photo_') ? 'image' : 'video',
     src: take.videoUrl,
     startTime: 0,
     duration: Math.max(3, take.duration),

@@ -26,6 +26,9 @@ export class ChromaKeyEngine {
   private uHasBgLoc: WebGLUniformLocation | null = null;
   private uFilterIdLoc: WebGLUniformLocation | null = null;
   private uFilterIntensityLoc: WebGLUniformLocation | null = null;
+  private uFlipXLoc: WebGLUniformLocation | null = null;
+  private uFgLoc: WebGLUniformLocation | null = null;
+  private uBgLoc: WebGLUniformLocation | null = null;
 
   // Background image element
   private bgImage: HTMLImageElement | null = null;
@@ -85,10 +88,14 @@ export class ChromaKeyEngine {
       uniform bool u_hasBg;
       uniform int u_filterId;
       uniform float u_filterIntensity;
+      uniform bool u_flipX;
       varying vec2 v_texCoord;
 
       void main() {
         vec2 uv = v_texCoord;
+        if (u_flipX) {
+          uv.x = 1.0 - uv.x;
+        }
         vec4 fg = texture2D(u_foreground, uv);
         vec4 bg = u_hasBg ? texture2D(u_background, uv) : vec4(0.0, 0.0, 0.0, 1.0);
 
@@ -159,6 +166,11 @@ export class ChromaKeyEngine {
     this.uHasBgLoc = gl.getUniformLocation(this.program, 'u_hasBg');
     this.uFilterIdLoc = gl.getUniformLocation(this.program, 'u_filterId');
     this.uFilterIntensityLoc = gl.getUniformLocation(this.program, 'u_filterIntensity');
+    this.uFlipXLoc = gl.getUniformLocation(this.program, 'u_flipX');
+    this.uFgLoc = gl.getUniformLocation(this.program, 'u_foreground');
+    this.uBgLoc = gl.getUniformLocation(this.program, 'u_background');
+    if (this.uFgLoc) gl.uniform1i(this.uFgLoc, 0);
+    if (this.uBgLoc) gl.uniform1i(this.uBgLoc, 1);
   }
 
   private compileShader(type: number, source: string): WebGLShader | null {
@@ -257,12 +269,13 @@ export class ChromaKeyEngine {
     sourceElement: HTMLVideoElement | HTMLCanvasElement,
     settings: ChromaKeySettings,
     filterId: string = 'normal',
-    filterIntensity: number = 0.5
+    filterIntensity: number = 0.5,
+    flipHorizontal: boolean = false
   ) {
     if (this.isWebGLSupported && this.gl && this.program) {
-      this.renderWebGL(sourceElement, settings, filterId, filterIntensity);
+      this.renderWebGL(sourceElement, settings, filterId, filterIntensity, flipHorizontal);
     } else {
-      this.renderCanvas2DFallback(sourceElement, settings);
+      this.renderCanvas2DFallback(sourceElement, settings, flipHorizontal);
     }
   }
 
@@ -270,7 +283,8 @@ export class ChromaKeyEngine {
     video: HTMLVideoElement | HTMLCanvasElement,
     settings: ChromaKeySettings,
     filterId: string,
-    filterIntensity: number
+    filterIntensity: number,
+    flipHorizontal: boolean
   ) {
     const gl = this.gl!;
 
@@ -290,14 +304,10 @@ export class ChromaKeyEngine {
     } catch {
       return;
     }
-    const uFgLoc = gl.getUniformLocation(this.program!, 'u_foreground');
-    gl.uniform1i(uFgLoc, 0);
 
     // Upload background image to texture unit 1
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.bgTexture);
-    const uBgLoc = gl.getUniformLocation(this.program!, 'u_background');
-    gl.uniform1i(uBgLoc, 1);
 
     // Uniform values
     const rgb = hexToRgbNormalized(settings.keyColor);
@@ -306,6 +316,7 @@ export class ChromaKeyEngine {
     gl.uniform1f(this.uSoftnessLoc, settings.enabled ? settings.softness : 0.0);
     gl.uniform1f(this.uSpillLoc, settings.enabled ? settings.spillReduction : 0.0);
     gl.uniform1i(this.uHasBgLoc, settings.enabled && this.bgLoaded ? 1 : 0);
+    gl.uniform1i(this.uFlipXLoc, flipHorizontal ? 1 : 0);
 
     // Filter uniform
     let fId = 0;
@@ -320,7 +331,8 @@ export class ChromaKeyEngine {
 
   private renderCanvas2DFallback(
     video: HTMLVideoElement | HTMLCanvasElement,
-    settings: ChromaKeySettings
+    settings: ChromaKeySettings,
+    flipHorizontal: boolean = false
   ) {
     const ctx = this.canvas.getContext('2d');
     if (!ctx) return;
@@ -337,7 +349,15 @@ export class ChromaKeyEngine {
     }
 
     if (!settings.enabled) {
-      ctx.drawImage(video, 0, 0, w, h);
+      if (flipHorizontal) {
+        ctx.save();
+        ctx.translate(w, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, 0, 0, w, h);
+        ctx.restore();
+      } else {
+        ctx.drawImage(video, 0, 0, w, h);
+      }
       return;
     }
 

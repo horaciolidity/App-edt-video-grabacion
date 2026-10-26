@@ -24,6 +24,7 @@ import {
   Trash2,
   FileAudio,
   Clock,
+  Timer,
   Settings2,
   CheckCircle2,
   AlertCircle
@@ -38,6 +39,26 @@ import {
 } from '../../constants/presets';
 import { ChromaKeyEngine } from '../../services/chromaKeyEngine';
 import { beatSynthesizer } from '../../services/beatSynthesizer';
+
+let cachedMimeType: string | null = null;
+function getSupportedMimeType(): string {
+  if (cachedMimeType !== null) return cachedMimeType;
+  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') return '';
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm',
+    'video/mp4'
+  ];
+  for (const t of candidates) {
+    if (MediaRecorder.isTypeSupported(t)) {
+      cachedMimeType = t;
+      return t;
+    }
+  }
+  cachedMimeType = '';
+  return '';
+}
 
 interface ImportedTrack {
   id: string;
@@ -65,6 +86,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
 }) => {
   // Camera & Stream State
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [isSwitchingCamera, setIsSwitchingCamera] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [torchOn, setTorchOn] = useState<boolean>(false);
   const [isSimulatedCamera, setIsSimulatedCamera] = useState<boolean>(false);
@@ -77,6 +99,11 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     height: 1920,
     fps: 30
   });
+
+  // Capture Mode & Responsive Zero-Latency Controls
+  const [cameraMode, setCameraMode] = useState<'video' | 'photo'>('video');
+  const [timerSeconds, setTimerSeconds] = useState<number>(0); // 0 = Instant (Off), 3 = 3s, 10 = 10s
+  const [isShutterFlashing, setIsShutterFlashing] = useState<boolean>(false);
 
   // Recording State
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -126,6 +153,8 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   const simAnimFrameRef = useRef<number | null>(null);
   const customAudioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const musicFileInputRef = useRef<HTMLInputElement | null>(null);
+  const countdownTimerRef = useRef<number | null>(null);
+  const switchSeqRef = useRef<number>(0);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -186,90 +215,212 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     }
   }, []);
 
-  // Start Hardware Camera Stream with 1080p target & advanced constraints
-  const startCamera = useCallback(async (facing: 'user' | 'environment', quality: Resolution) => {
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-      }
+  // Acquire camera video track using multi-tiered fallbacks
+  const acquireCameraTrack = useCallback(async (
+    targetFacing: 'user' | 'environment',
+    targetRes: { width: number; height: number }
+  ): Promise<MediaStreamTrack> => {
+    // 5 Progressive constraint tiers ensuring universal Android & Desktop front/rear camera compatibility
+    const constraintTiers: MediaTrackConstraints[] = [
+      // Tier 1: Target quality resolution with ideal facingMode (no strict min limits!)
+      {
+        facingMode: { ideal: targetFacing },
+        width: { ideal: targetRes.width },
+        height: { ideal: targetRes.height },
+        aspectRatio: { ideal: 9 / 16 },
+        frameRate: { ideal: 30, max: 60 }
+      },
+      // Tier 2: Standard 720p ideal resolution
+      {
+        facingMode: { ideal: targetFacing },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
+      },
+      // Tier 3: Ideal facingMode only
+      {
+        facingMode: { ideal: targetFacing }
+      },
+      // Tier 4: Direct facingMode constraint
+      {
+        facingMode: targetFacing
+      },
+      // Tier 5: Generic video capture (any available camera sensor)
+      {}
+    ];
 
-      setPermissionError(null);
-      const targetRes = getResolutionDimensions(quality);
-
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: facing },
-          width: { ideal: targetRes.width, min: 480, max: 1920 },
-          height: { ideal: targetRes.height, min: 854, max: 1920 },
-          aspectRatio: { ideal: 9 / 16 },
-          frameRate: { ideal: 30, max: 60 }
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 2,
-          sampleRate: 48000
-        }
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      streamRef.current = stream;
-
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        // Inspect real settings
-        const settings = videoTrack.getSettings();
-        setActualStreamResolution({
-          width: settings.width || targetRes.width,
-          height: settings.height || targetRes.height,
-          fps: Math.round(settings.frameRate || 30)
+    let lastError: unknown = null;
+    for (const constraints of constraintTiers) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: constraints,
+          audio: false
         });
+        const track = stream.getVideoTracks()[0];
+        if (track) {
+          return track;
+        }
+      } catch (err) {
+        lastError = err;
+        // Proceed to next fallback tier
+      }
+    }
 
-        // Apply hardware camera enhancements where supported (autofocus, exposure, stabilization)
-        if (typeof videoTrack.getCapabilities === 'function') {
-          const caps = (videoTrack.getCapabilities() as Record<string, unknown>) || {};
-          const advancedConstraint: Record<string, unknown> = {};
+    throw lastError || new Error('No video track available');
+  }, []);
 
-          if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
-            advancedConstraint.focusMode = 'continuous';
-          }
-          if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
-            advancedConstraint.exposureMode = 'continuous';
-          }
-          if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
-            advancedConstraint.whiteBalanceMode = 'continuous';
-          }
-          if (caps.imageStabilization) {
-            advancedConstraint.imageStabilization = true;
-          }
+  // Robust Camera Switcher: Seamless zero-latency video lens switch with audio preservation
+  const switchCamera = useCallback(async (
+    targetFacing: 'user' | 'environment',
+    quality: Resolution
+  ) => {
+    if (isSwitchingCamera) return;
+    if (isRecording) {
+      showToast('Camera switch locked while recording');
+      return;
+    }
 
-          if (Object.keys(advancedConstraint).length > 0) {
-            videoTrack.applyConstraints({
-              advanced: [advancedConstraint as MediaTrackConstraintSet]
-            }).catch(() => {});
-          }
+    const seq = ++switchSeqRef.current;
+    setIsSwitchingCamera(true);
+
+    // Front camera has no flash hardware; turn off torch
+    if (targetFacing === 'user') {
+      setTorchOn(false);
+    }
+
+    try {
+      const targetRes = getResolutionDimensions(quality);
+      const existingAudioTrack = streamRef.current?.getAudioTracks().find(t => t.readyState === 'live');
+
+      // 1. Acquire new video track using tiered fallbacks
+      const newVideoTrack = await acquireCameraTrack(targetFacing, targetRes);
+
+      // Check if a newer switch request superseded this one
+      if (seq !== switchSeqRef.current) {
+        newVideoTrack.stop();
+        return;
+      }
+
+      // 2. Ensure microphone audio track is available (preserve existing to avoid audio re-negotiation pause)
+      let audioTrack = existingAudioTrack;
+      if (!audioTrack) {
+        try {
+          const audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 2,
+              sampleRate: 48000
+            }
+          });
+          audioTrack = audioStream.getAudioTracks()[0];
+        } catch (audioErr) {
+          console.warn('Microphone permission or stream note:', audioErr);
         }
       }
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(() => {});
+      // 3. Assemble new combined MediaStream
+      const streamTracks: MediaStreamTrack[] = [newVideoTrack];
+      if (audioTrack && audioTrack.readyState === 'live') {
+        streamTracks.push(audioTrack);
       }
-      setIsSimulatedCamera(false);
-    } catch (err: unknown) {
-      console.warn('Physical camera unavailable, enabling high-res simulated studio feed:', err);
-      setIsSimulatedCamera(true);
-      setPermissionError('Camera unavailable or permission denied. Simulated studio feed active.');
-    }
-  }, [getResolutionDimensions]);
+      const newStream = new MediaStream(streamTracks);
 
+      // 4. Attach new stream to hidden video element & wait for decoded frame readiness
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = newStream;
+        await new Promise<void>((resolve) => {
+          let resolved = false;
+          const onReady = () => {
+            if (!resolved) {
+              resolved = true;
+              video.removeEventListener('loadedmetadata', onReady);
+              video.removeEventListener('canplay', onReady);
+              resolve();
+            }
+          };
+
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            resolve();
+          } else {
+            video.addEventListener('loadedmetadata', onReady, { once: true });
+            video.addEventListener('canplay', onReady, { once: true });
+            setTimeout(onReady, 600); // 600ms safety timeout to avoid hanging
+          }
+        });
+        await video.play().catch(() => {});
+      }
+
+      // 5. Seamless handoff: stop previous video track ONLY after new stream is active
+      if (streamRef.current) {
+        streamRef.current.getVideoTracks().forEach(oldTrack => {
+          if (oldTrack !== newVideoTrack) oldTrack.stop();
+        });
+      }
+      streamRef.current = newStream;
+
+      // 6. Inspect real settings of the active sensor
+      const settings = newVideoTrack.getSettings();
+      setActualStreamResolution({
+        width: settings.width || targetRes.width,
+        height: settings.height || targetRes.height,
+        fps: Math.round(settings.frameRate || 30)
+      });
+
+      // 7. Apply hardware enhancements where supported
+      if (typeof newVideoTrack.getCapabilities === 'function') {
+        const caps = (newVideoTrack.getCapabilities() as Record<string, unknown>) || {};
+        const advancedConstraint: Record<string, unknown> = {};
+
+        if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+          advancedConstraint.focusMode = 'continuous';
+        }
+        if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+          advancedConstraint.exposureMode = 'continuous';
+        }
+        if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
+          advancedConstraint.whiteBalanceMode = 'continuous';
+        }
+        if (caps.imageStabilization) {
+          advancedConstraint.imageStabilization = true;
+        }
+
+        if (Object.keys(advancedConstraint).length > 0) {
+          newVideoTrack.applyConstraints({
+            advanced: [advancedConstraint as MediaTrackConstraintSet]
+          }).catch(() => {});
+        }
+      }
+
+      setFacingMode(targetFacing);
+      setIsSimulatedCamera(false);
+      setPermissionError(null);
+      showToast(targetFacing === 'user' ? 'Front Selfie Lens' : 'Rear Ultra Studio Lens');
+    } catch (err: unknown) {
+      console.warn('Physical camera unavailable or switch error:', err);
+      // Fallback: If no live video stream exists at all, activate simulated studio feed
+      const hasLiveStream = streamRef.current && streamRef.current.getVideoTracks().some(t => t.readyState === 'live');
+      if (!hasLiveStream) {
+        setIsSimulatedCamera(true);
+        setPermissionError('Camera unavailable or permission denied. Simulated studio feed active.');
+      } else {
+        showToast('Lens switch failed. Active camera preserved.');
+      }
+    } finally {
+      setIsSwitchingCamera(false);
+    }
+  }, [acquireCameraTrack, getResolutionDimensions, isRecording, isSwitchingCamera]);
+
+  // Initial camera startup on component mount; cleanup only on unmount
   useEffect(() => {
-    startCamera(facingMode, recordingQuality);
+    switchCamera('user', recordingQuality);
+
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
       }
       beatSynthesizer.stop();
       if (customAudioPlayerRef.current) {
@@ -278,7 +429,34 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       if (simAnimFrameRef.current) cancelAnimationFrame(simAnimFrameRef.current);
     };
-  }, [facingMode, recordingQuality, startCamera]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Dynamic Camera Recording Resolution Adjustment without stream recreation
+  const handleChangeQuality = useCallback((quality: Resolution) => {
+    setRecordingQuality(quality);
+    setShowQualityMenu(false);
+    showToast(`Quality set to ${quality}`);
+
+    const videoTrack = streamRef.current?.getVideoTracks()[0];
+    if (videoTrack) {
+      const dims = getResolutionDimensions(quality);
+      videoTrack.applyConstraints({
+        width: { ideal: dims.width },
+        height: { ideal: dims.height }
+      }).then(() => {
+        const s = videoTrack.getSettings();
+        setActualStreamResolution({
+          width: s.width || dims.width,
+          height: s.height || dims.height,
+          fps: Math.round(s.frameRate || 30)
+        });
+      }).catch(() => {
+        // If applyConstraints fails on device, cleanly refresh camera lens
+        switchCamera(facingMode, quality);
+      });
+    }
+  }, [facingMode, getResolutionDimensions, switchCamera]);
 
   // High-Resolution Simulated Camera Canvas Animation
   useEffect(() => {
@@ -348,12 +526,13 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     const loop = () => {
       const source = isSimulatedCamera ? simulatedCanvasRef.current : videoRef.current;
       if (source && canvasRef.current && engineRef.current) {
+        const isMirrored = facingMode === 'user' && !isSimulatedCamera;
         if (source instanceof HTMLVideoElement) {
-          if (source.readyState >= 2) {
-            engineRef.current.render(source, chromaSettings, activeFilterId, filterIntensity);
+          if (source.readyState >= 2 && source.videoWidth > 0) {
+            engineRef.current.render(source, chromaSettings, activeFilterId, filterIntensity, isMirrored);
           }
         } else if (source instanceof HTMLCanvasElement) {
-          engineRef.current.render(source, chromaSettings, activeFilterId, filterIntensity);
+          engineRef.current.render(source, chromaSettings, activeFilterId, filterIntensity, false);
         }
       }
       animFrameRef.current = requestAnimationFrame(loop);
@@ -363,12 +542,18 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     return () => {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [chromaSettings, activeFilterId, filterIntensity, isSimulatedCamera]);
+  }, [chromaSettings, activeFilterId, filterIntensity, isSimulatedCamera, facingMode]);
 
-  // Toggle Camera Front / Back
-  const handleToggleCamera = () => {
-    setFacingMode(prev => (prev === 'user' ? 'environment' : 'user'));
-  };
+  // Toggle Camera Front / Back with race-condition protection and instant responsive state
+  const handleToggleCamera = useCallback(() => {
+    if (isSwitchingCamera) return;
+    if (isRecording) {
+      showToast('Camera switch locked while recording');
+      return;
+    }
+    const nextFacing = facingMode === 'user' ? 'environment' : 'user';
+    switchCamera(nextFacing, recordingQuality);
+  }, [facingMode, isRecording, isSwitchingCamera, recordingQuality, switchCamera]);
 
   // Zoom Control
   const handleZoom = (lvl: number) => {
@@ -525,26 +710,121 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     showToast('Track removed');
   };
 
-  // 3. Trigger Recording with Countdown & Music Playback Sync
-  const handleStartCountdown = () => {
-    if (isRecording) return;
-    setCountdown(3);
-    const countTimer = setInterval(() => {
+  // Instant Responsive Timer & Shutter Control
+  const cancelCountdown = () => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    setCountdown(null);
+  };
+
+  const startWithTimerOrImmediate = (action: () => void) => {
+    if (timerSeconds === 0) {
+      // ZERO LATENCY: Execute immediately on current tick
+      action();
+      return;
+    }
+
+    cancelCountdown();
+    setCountdown(timerSeconds);
+    countdownTimerRef.current = window.setInterval(() => {
       setCountdown(prev => {
         if (prev === null || prev <= 1) {
-          clearInterval(countTimer);
-          startActualRecording();
+          if (countdownTimerRef.current) {
+            clearInterval(countdownTimerRef.current);
+            countdownTimerRef.current = null;
+          }
+          action();
           return null;
         }
         return prev - 1;
       });
-    }, 900);
+    }, 1000);
   };
 
-  const startActualRecording = () => {
-    if (!canvasRef.current) return;
+  // Instant Photo Capture (0ms latency, instant shutter flash animation, immediate gallery sync)
+  const captureInstantPhoto = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    // Start music playback in sync
+    // Instant tactile feedback: 80ms screen flash
+    setIsShutterFlashing(true);
+    setTimeout(() => setIsShutterFlashing(false), 80);
+
+    try {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            showToast('Capture error');
+            return;
+          }
+          const photoUrl = URL.createObjectURL(blob);
+          const takeNum = recordedTakes.length + 1;
+          const isCustom = musicSourceType === 'custom' && !!selectedCustomTrack;
+
+          const photoTake: ProjectTake = {
+            id: 'photo_' + Date.now(),
+            takeNumber: takeNum,
+            title: `Photo ${takeNum} (${activeFilterId !== 'normal' ? 'FX' : 'Studio'})`,
+            createdAt: Date.now(),
+            videoUrl: photoUrl,
+            thumbnailUrl: photoUrl,
+            duration: 3, // Standard 3-second display duration when added to video timeline
+            beatId: isCustom ? selectedCustomTrack?.id : selectedBeat.id,
+            beatName: isCustom ? selectedCustomTrack?.title : selectedBeat.title,
+            isCustomMusic: isCustom,
+            latencyOffsetMs: 0,
+            chromaSettings: { ...chromaSettings },
+            filterId: activeFilterId
+          };
+
+          setRecordedTakes(prev => [photoTake, ...prev]);
+          onTakeRecorded(photoTake);
+          showToast('Photo captured!');
+        },
+        'image/jpeg',
+        0.95
+      );
+    } catch {
+      try {
+        const photoUrl = canvas.toDataURL('image/jpeg', 0.95);
+        const takeNum = recordedTakes.length + 1;
+        const photoTake: ProjectTake = {
+          id: 'photo_' + Date.now(),
+          takeNumber: takeNum,
+          title: `Photo ${takeNum}`,
+          createdAt: Date.now(),
+          videoUrl: photoUrl,
+          thumbnailUrl: photoUrl,
+          duration: 3,
+          latencyOffsetMs: 0,
+          chromaSettings: { ...chromaSettings },
+          filterId: activeFilterId
+        };
+        setRecordedTakes(prev => [photoTake, ...prev]);
+        onTakeRecorded(photoTake);
+        showToast('Photo captured!');
+      } catch {
+        showToast('Capture error');
+      }
+    }
+  };
+
+  // Immediate Video Recording (0ms latency with synchronized music & hardware tracks)
+  const startActualRecording = () => {
+    if (!canvasRef.current || isRecording) return;
+
+    // Trigger visual flash confirmation
+    setIsShutterFlashing(true);
+    setTimeout(() => setIsShutterFlashing(false), 80);
+
+    // Synchronously update recording state immediately for instant button reaction
+    setIsRecording(true);
+    setIsPaused(false);
+    setRecordSeconds(0);
+
+    // Start music playback synchronously
     if (musicSourceType === 'beats') {
       beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
     } else if (selectedCustomTrack && customAudioPlayerRef.current) {
@@ -566,18 +846,8 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     const recordStream = new MediaStream(tracks);
     recordedChunksRef.current = [];
 
-    // Select optimal mimeType
-    let mimeType = 'video/webm;codecs=vp9,opus';
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = 'video/webm;codecs=vp8,opus';
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = 'video/webm';
-        if (!MediaRecorder.isTypeSupported(mimeType)) {
-          mimeType = '';
-        }
-      }
-    }
-
+    // Pre-cached optimal mimeType
+    const mimeType = getSupportedMimeType();
     const qualityConfig = getResolutionDimensions(recordingQuality);
 
     try {
@@ -628,15 +898,14 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
 
       recorder.start(100);
       mediaRecorderRef.current = recorder;
-      setIsRecording(true);
-      setIsPaused(false);
-      setRecordSeconds(0);
 
+      if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
       recordIntervalRef.current = window.setInterval(() => {
         setRecordSeconds(s => s + 1);
       }, 1000);
     } catch (e) {
       console.error('Failed to start MediaRecorder:', e);
+      setIsRecording(false);
       showToast('Recording error. Try reducing resolution to 720p.');
     }
   };
@@ -665,11 +934,14 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     }
   };
 
+  // Immediate Stop (0ms UI latency)
   const handleStopRecording = () => {
     if (!mediaRecorderRef.current || !isRecording) return;
-    mediaRecorderRef.current.stop();
+
+    // Immediate UI feedback on current frame
     setIsRecording(false);
     setIsPaused(false);
+
     if (recordIntervalRef.current) {
       clearInterval(recordIntervalRef.current);
       recordIntervalRef.current = null;
@@ -679,6 +951,14 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       customAudioPlayerRef.current.pause();
     }
     setIsMusicPreviewing(false);
+
+    try {
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+    } catch (err) {
+      console.warn('Error stopping MediaRecorder:', err);
+    }
   };
 
   const formatTimer = (totalSeconds: number) => {
@@ -722,12 +1002,21 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         className="hidden"
       />
 
-      {/* Hidden raw video & fallback simulated canvas */}
+      {/* Hidden raw video & fallback simulated canvas (off-screen layout ensures Chromium frame decoder stays active) */}
       <video
         ref={videoRef}
         playsInline
         muted
-        className="hidden"
+        autoPlay
+        style={{
+          position: 'fixed',
+          top: -9999,
+          left: -9999,
+          width: '1px',
+          height: '1px',
+          opacity: 0,
+          pointerEvents: 'none'
+        }}
       />
       <canvas
         ref={simulatedCanvasRef}
@@ -751,12 +1040,19 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
           width={canvasDims.width}
           height={canvasDims.height}
           onClick={handleCanvasClick}
-          className={`max-h-full max-w-full aspect-[9/16] object-contain shadow-2xl transition-transform ${
+          className={`max-h-full max-w-full aspect-[9/16] object-contain shadow-2xl transition-all ${
             isEyedropperActive ? 'cursor-crosshair ring-2 ring-cyan-400' : ''
-          }`}
+          } ${isRecording ? 'ring-2 ring-red-500 shadow-red-900/40' : ''}`}
           style={{
             transform: `scale(${zoomLevel})`
           }}
+        />
+
+        {/* Instant Shutter Flash effect (80ms tactile visual response) */}
+        <div
+          className={`absolute inset-0 bg-white pointer-events-none transition-opacity duration-75 z-50 ${
+            isShutterFlashing ? 'opacity-70' : 'opacity-0'
+          }`}
         />
 
         {/* Eyedropper indicator tooltip */}
@@ -767,11 +1063,17 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
           </div>
         )}
 
-        {/* 3-2-1 Countdown Overlay */}
+        {/* 3-2-1 Countdown Overlay with tap-to-cancel */}
         {countdown !== null && (
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 animate-pulse">
+          <div
+            onClick={cancelCountdown}
+            className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center z-50 animate-pulse cursor-pointer"
+          >
             <span className="text-9xl font-black text-transparent bg-clip-text bg-gradient-to-tr from-purple-400 via-pink-400 to-cyan-300 drop-shadow-[0_0_40px_rgba(168,85,247,0.8)]">
               {countdown}
+            </span>
+            <span className="text-xs text-slate-300 bg-slate-900/90 px-3 py-1 rounded-full border border-slate-700 mt-4 shadow-lg">
+              Tap anywhere to cancel timer
             </span>
           </div>
         )}
@@ -808,11 +1110,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                     {(['1080p', '720p', '480p'] as Resolution[]).map((res) => (
                       <button
                         key={res}
-                        onClick={() => {
-                          setRecordingQuality(res);
-                          setShowQualityMenu(false);
-                          showToast(`Quality set to ${res}`);
-                        }}
+                        onClick={() => handleChangeQuality(res)}
                         className={`w-full text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer transition-colors ${
                           recordingQuality === res
                             ? 'bg-purple-600 text-white font-bold'
@@ -841,6 +1139,26 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
 
           {/* Quick controls on top right */}
           <div className="pointer-events-auto flex items-center gap-1.5">
+            {/* Self-Timer Toggle: 0s (Instant) / 3s / 10s */}
+            <button
+              onClick={() => {
+                const next = timerSeconds === 0 ? 3 : timerSeconds === 3 ? 10 : 0;
+                setTimerSeconds(next);
+                showToast(next === 0 ? 'Timer: Off (Instant Capture)' : `Timer: ${next}s`);
+              }}
+              className={`min-h-[40px] px-2.5 rounded-full p-2 backdrop-blur-md border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                timerSeconds > 0
+                  ? 'bg-purple-600 text-white border-purple-400 font-bold'
+                  : 'bg-slate-900/80 text-slate-300 border-slate-700/60 hover:text-white'
+              }`}
+              title={`Timer: ${timerSeconds === 0 ? 'Off (Instant Capture)' : timerSeconds + 's'}`}
+            >
+              <Timer className="w-4 h-4" />
+              <span className="text-[10px] font-mono font-bold">
+                {timerSeconds === 0 ? 'Off' : `${timerSeconds}s`}
+              </span>
+            </button>
+
             {/* Flash / Torch */}
             <button
               onClick={handleToggleTorch}
@@ -852,13 +1170,24 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               <Sun className="w-4 h-4" />
             </button>
 
-            {/* Flip camera */}
+            {/* Flip camera with Android-style responsive feedback and active rotation */}
             <button
               onClick={handleToggleCamera}
-              className="min-h-[40px] min-w-[40px] rounded-full p-2 bg-slate-900/80 border border-slate-700/60 text-slate-300 hover:text-white backdrop-blur-md transition-all active:rotate-180 cursor-pointer flex items-center justify-center"
-              title="Switch Front/Rear Camera"
+              disabled={isSwitchingCamera || isRecording}
+              className={`min-h-[40px] min-w-[40px] rounded-full p-2 bg-slate-900/80 border border-slate-700/60 backdrop-blur-md transition-all cursor-pointer flex items-center justify-center ${
+                isSwitchingCamera
+                  ? 'opacity-80 text-purple-400 border-purple-500/50 ring-2 ring-purple-500/30'
+                  : 'text-slate-300 hover:text-white active:scale-95'
+              } ${isRecording ? 'opacity-40 cursor-not-allowed' : ''}`}
+              title={
+                isRecording
+                  ? 'Camera switch locked while recording'
+                  : isSwitchingCamera
+                  ? 'Switching camera lens...'
+                  : `Switch to ${facingMode === 'user' ? 'Rear Ultra' : 'Front Selfie'} Camera`
+              }
             >
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw className={`w-4 h-4 transition-transform ${isSwitchingCamera ? 'animate-spin text-purple-400' : ''}`} />
             </button>
           </div>
         </div>
@@ -1519,82 +1848,172 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       </div>
 
       {/* Bottom Shutter & Recording Controls Deck */}
-      <div className="h-28 bg-[#0a0a12]/95 border-t border-slate-800/80 px-6 flex items-center justify-between shrink-0 z-20 pb-safe">
-        {/* Left: Takes preview thumbnail */}
-        <div className="w-20">
-          {recordedTakes.length > 0 ? (
+      <div className="bg-[#0a0a12]/95 border-t border-slate-800/80 px-4 py-2.5 flex flex-col justify-center shrink-0 z-20 pb-safe">
+        {/* Mode Switcher: PHOTO vs VIDEO */}
+        {!isRecording && (
+          <div className="flex items-center justify-center gap-6 pb-2 select-none">
             <button
-              onClick={() => setActiveTakePreview(recordedTakes[0])}
-              className="relative w-12 h-16 rounded-lg overflow-hidden border border-purple-500/60 group cursor-pointer shadow-lg"
-              title="Preview latest recorded take"
+              onClick={() => {
+                setCameraMode('photo');
+                showToast('Photo Mode: Instant Capture');
+              }}
+              className={`text-xs font-bold uppercase tracking-wider transition-all cursor-pointer py-1 px-3 rounded-full ${
+                cameraMode === 'photo'
+                  ? 'text-yellow-400 bg-yellow-400/10 ring-1 ring-yellow-400/30 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
             >
-              <video
-                src={recordedTakes[0].videoUrl}
-                className="w-full h-full object-cover"
-              />
-              <div className="absolute inset-0 bg-black/30 group-hover:bg-transparent transition-colors flex items-center justify-center">
-                <span className="text-[10px] font-bold text-white bg-black/60 px-1 rounded">
-                  {recordedTakes.length}
-                </span>
-              </div>
+              Photo
             </button>
-          ) : (
-            <div className="text-[11px] text-slate-500 font-medium">0 Takes</div>
-          )}
-        </div>
-
-        {/* Center: Tactile Shutter Recording Button */}
-        <div className="flex items-center gap-4">
-          {isRecording && (
             <button
-              onClick={handlePauseResume}
-              className="w-12 h-12 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center border border-slate-600 transition-all cursor-pointer"
-              title={isPaused ? 'Resume Recording' : 'Pause Recording'}
+              onClick={() => {
+                setCameraMode('video');
+                showToast('Video Mode: Instant Recording');
+              }}
+              className={`text-xs font-bold uppercase tracking-wider transition-all cursor-pointer py-1 px-3 rounded-full ${
+                cameraMode === 'video'
+                  ? 'text-yellow-400 bg-yellow-400/10 ring-1 ring-yellow-400/30 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
             >
-              {isPaused ? <Play className="w-5 h-5 text-emerald-400 fill-emerald-400" /> : <Pause className="w-5 h-5 text-amber-400 fill-amber-400" />}
+              Video
             </button>
-          )}
+          </div>
+        )}
 
-          <button
-            onClick={isRecording ? handleStopRecording : handleStartCountdown}
-            className={`relative min-h-[72px] min-w-[72px] rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xl ${
-              isRecording
-                ? 'bg-red-600 hover:bg-red-700 ring-8 ring-red-600/30 scale-105'
-                : 'bg-gradient-to-tr from-purple-600 via-pink-600 to-cyan-500 hover:scale-105 ring-4 ring-purple-500/20 active:scale-95'
-            }`}
-          >
-            {isRecording ? (
-              <Square className="w-7 h-7 text-white fill-white" />
+        {/* Shutter Deck Main Controls Row */}
+        <div className="flex items-center justify-between">
+          {/* Left: Takes preview thumbnail */}
+          <div className="w-20">
+            {recordedTakes.length > 0 ? (
+              <button
+                onClick={() => setActiveTakePreview(recordedTakes[0])}
+                className="relative w-12 h-14 rounded-lg overflow-hidden border border-purple-500/60 group cursor-pointer shadow-lg active:scale-95 transition-transform"
+                title="Preview latest capture"
+              >
+                {recordedTakes[0].id.startsWith('photo_') ? (
+                  <img
+                    src={recordedTakes[0].thumbnailUrl || recordedTakes[0].videoUrl}
+                    alt="Latest capture"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <video
+                    src={recordedTakes[0].videoUrl}
+                    className="w-full h-full object-cover"
+                  />
+                )}
+                <div className="absolute inset-0 bg-black/25 group-hover:bg-transparent transition-colors flex items-center justify-center">
+                  <span className="text-[10px] font-bold text-white bg-black/70 px-1 rounded">
+                    {recordedTakes.length}
+                  </span>
+                </div>
+              </button>
             ) : (
-              <div className="w-7 h-7 rounded-full bg-white shadow-inner" />
+              <div className="text-[11px] text-slate-500 font-medium">0 Captures</div>
             )}
-          </button>
-        </div>
+          </div>
 
-        {/* Right: Quick jump to Multitrack Editor */}
-        <div className="w-20 flex justify-end">
-          <button
-            onClick={() => onNavigateTab('editor')}
-            className="flex flex-col items-center gap-1 text-slate-400 hover:text-purple-400 transition-colors cursor-pointer"
-          >
-            <Layers className="w-5 h-5" />
-            <span className="text-[10px] font-medium whitespace-nowrap">Open Editor</span>
-          </button>
+          {/* Center: Tactile Shutter Recording / Photo Button */}
+          <div className="flex items-center gap-3">
+            {isRecording && (
+              <>
+                {/* Instant Still Snapshot button while recording video */}
+                <button
+                  onClick={captureInstantPhoto}
+                  className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center border border-white/60 transition-all active:scale-90 cursor-pointer shadow-md"
+                  title="Snap photo while recording"
+                >
+                  <Camera className="w-4 h-4 text-white" />
+                </button>
+
+                {/* Pause/Resume */}
+                <button
+                  onClick={handlePauseResume}
+                  className="w-11 h-11 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center border border-slate-600 transition-all active:scale-90 cursor-pointer"
+                  title={isPaused ? 'Resume Recording' : 'Pause Recording'}
+                >
+                  {isPaused ? <Play className="w-5 h-5 text-emerald-400 fill-emerald-400" /> : <Pause className="w-5 h-5 text-amber-400 fill-amber-400" />}
+                </button>
+              </>
+            )}
+
+            {cameraMode === 'photo' ? (
+              /* PHOTO SHUTTER BUTTON: Instant tactile photo snap */
+              <button
+                onClick={() => {
+                  if (countdown !== null) {
+                    cancelCountdown();
+                  } else {
+                    startWithTimerOrImmediate(captureInstantPhoto);
+                  }
+                }}
+                className="relative min-h-[68px] min-w-[68px] rounded-full border-4 border-white flex items-center justify-center transition-all cursor-pointer shadow-xl active:scale-90 bg-white/10 hover:bg-white/20"
+                title="Take Photo Immediately"
+              >
+                <div className="w-13 h-13 rounded-full bg-white shadow-inner" />
+              </button>
+            ) : (
+              /* VIDEO SHUTTER BUTTON: Instant start / stop */
+              <button
+                onClick={() => {
+                  if (isRecording) {
+                    handleStopRecording();
+                  } else if (countdown !== null) {
+                    cancelCountdown();
+                  } else {
+                    startWithTimerOrImmediate(startActualRecording);
+                  }
+                }}
+                className={`relative min-h-[68px] min-w-[68px] rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xl active:scale-90 ${
+                  isRecording
+                    ? 'bg-red-600 hover:bg-red-700 ring-8 ring-red-600/30 scale-105'
+                    : 'bg-gradient-to-tr from-purple-600 via-pink-600 to-cyan-500 hover:scale-105 ring-4 ring-purple-500/20'
+                }`}
+                title={isRecording ? 'Stop Recording' : 'Start Recording Immediately'}
+              >
+                {isRecording ? (
+                  <Square className="w-6 h-6 text-white fill-white" />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-white shadow-inner" />
+                )}
+              </button>
+            )}
+          </div>
+
+          {/* Right: Quick jump to Multitrack Editor */}
+          <div className="w-20 flex justify-end">
+            <button
+              onClick={() => onNavigateTab('editor')}
+              className="flex flex-col items-center gap-1 text-slate-400 hover:text-purple-400 transition-colors cursor-pointer"
+            >
+              <Layers className="w-5 h-5" />
+              <span className="text-[10px] font-medium whitespace-nowrap">Open Editor</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Recorded Take Preview Modal */}
+      {/* Recorded Take Preview Modal (Photos and Videos) */}
       {activeTakePreview && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 max-w-sm w-full shadow-2xl flex flex-col items-center">
             <h4 className="text-base font-bold text-white mb-2">{activeTakePreview.title}</h4>
-            <div className="w-full aspect-[9/16] bg-black rounded-2xl overflow-hidden shadow-inner mb-4 relative">
-              <video
-                src={activeTakePreview.videoUrl}
-                controls
-                autoPlay
-                className="w-full h-full object-contain"
-              />
+            <div className="w-full aspect-[9/16] bg-black rounded-2xl overflow-hidden shadow-inner mb-4 relative flex items-center justify-center">
+              {activeTakePreview.id.startsWith('photo_') ? (
+                <img
+                  src={activeTakePreview.thumbnailUrl || activeTakePreview.videoUrl}
+                  alt={activeTakePreview.title}
+                  className="w-full h-full object-contain"
+                />
+              ) : (
+                <video
+                  src={activeTakePreview.videoUrl}
+                  controls
+                  autoPlay
+                  className="w-full h-full object-contain"
+                />
+              )}
             </div>
             <div className="flex items-center gap-3 w-full">
               <button
@@ -1610,7 +2029,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                 }}
                 className="flex-1 py-2.5 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs shadow-lg shadow-purple-600/30 transition-all cursor-pointer"
               >
-                Edit in Timeline
+                {activeTakePreview.id.startsWith('photo_') ? 'Add to Timeline' : 'Edit in Timeline'}
               </button>
             </div>
           </div>
