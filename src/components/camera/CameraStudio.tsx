@@ -697,7 +697,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   const canvasDims = getResolutionDimensions(recordingQuality);
 
   return (
-    <div className="relative w-full h-[calc(100vh-3.5rem)] bg-black overflow-hidden flex flex-col select-none">
+    <div className="relative w-full h-full flex-1 min-h-0 bg-black overflow-hidden flex flex-col select-none">
       {/* Hidden audio player for custom music playback */}
       {selectedCustomTrack && (
         <audio
@@ -777,7 +777,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         )}
 
         {/* Top Viewfinder Floating HUD */}
-        <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-20 pointer-events-none">
+        <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-40 pointer-events-none pt-safe">
           {/* Status info & Quality pill */}
           <div className="pointer-events-auto flex items-center gap-2">
             {isRecording ? (
@@ -938,9 +938,9 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
 
         {/* 4. Sliding Contextual Panel: CHROMA KEY (With Clear Top-Left Back Button) */}
         {showChromaPanel && (
-          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-96 bg-slate-950/95 border border-purple-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[72vh] overflow-y-auto">
+          <div className="absolute left-3 right-3 sm:left-auto sm:right-16 sm:w-96 top-16 sm:top-18 bottom-28 sm:bottom-32 bg-slate-950/95 border border-purple-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 flex flex-col overflow-hidden">
             {/* Header with Top-Left Back Navigation */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
               <button
                 onClick={() => setShowChromaPanel(false)}
                 className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
@@ -965,7 +965,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               </label>
             </div>
 
-            <div className="space-y-4 pt-3 text-xs">
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-4 pt-3 text-xs">
               {/* Color Selection & Eyedropper */}
               <div>
                 <label className="text-slate-400 font-medium block mb-1.5">Key Screen Color</label>
@@ -1108,9 +1108,9 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
 
         {/* 5. Sliding Contextual Panel: LIVE ARTIST FILTERS (With Top-Left Back Navigation & Parameter Sub-View) */}
         {showFiltersPanel && (
-          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-92 bg-slate-950/95 border border-pink-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[72vh] overflow-y-auto">
+          <div className="absolute left-3 right-3 sm:left-auto sm:right-16 sm:w-92 top-16 sm:top-18 bottom-28 sm:bottom-32 bg-slate-950/95 border border-pink-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 flex flex-col overflow-hidden">
             {/* Header with Top-Left Back Navigation */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
               {fxPanelSubView === 'tune' ? (
                 <button
                   onClick={() => setFxPanelSubView('list')}
@@ -1149,7 +1149,8 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               </button>
             </div>
 
-            {/* Sub-View: TUNE / INTENSITY PARAMETERS */}
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+              {/* Sub-View: TUNE / INTENSITY PARAMETERS */}
             {fxPanelSubView === 'tune' ? (
               <div className="space-y-4 pt-3 text-xs">
                 <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
@@ -1251,14 +1252,15 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                 </div>
               </div>
             )}
+            </div>
           </div>
         )}
 
         {/* 6. Sliding Contextual Panel: BACKING BEATS & CUSTOM MUSIC IMPORT (With Top-Left Back Navigation) */}
         {showAudioPanel && (
-          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-96 bg-slate-950/95 border border-cyan-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[75vh] overflow-y-auto">
+          <div className="absolute left-3 right-3 sm:left-auto sm:right-16 sm:w-96 top-16 sm:top-18 bottom-28 sm:bottom-32 bg-slate-950/95 border border-cyan-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 flex flex-col overflow-hidden">
             {/* Header with Top-Left Back Navigation */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
               <button
                 onClick={() => setShowAudioPanel(false)}
                 className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
@@ -1287,7 +1289,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
             </div>
 
             {/* Music Tabs: Built-in Beats vs My Music Import */}
-            <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 rounded-xl my-3 text-xs font-semibold">
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 rounded-xl my-3 text-xs font-semibold shrink-0">
               <button
                 onClick={() => {
                   setMusicSourceType('beats');
@@ -1323,7 +1325,9 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               </button>
             </div>
 
-            {/* TAB A: BUILT-IN BEATS */}
+            {/* Scrollable Body: Tabs Content & Latency Offset */}
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3">
+              {/* TAB A: BUILT-IN BEATS */}
             {musicSourceType === 'beats' && (
               <div className="space-y-2 text-xs">
                 {PRESET_BEATS.map((beat) => {
@@ -1508,6 +1512,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               <p className="text-[10px] text-slate-500 mt-1">
                 Tip: Plug in wired or low-latency headphones to hear the music while recording without microphone bleed.
               </p>
+            </div>
             </div>
           </div>
         )}
