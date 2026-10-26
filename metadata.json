@@ -1,0 +1,11 @@
+{
+  "name": "Remix VibeStudio: Mobile Music Video Creator",
+  "description": "Professional mobile music video recording studio \u0026 multitrack editor with real-time GPU chroma key, artist filters, karaoke backing track sync, and multitrack editing.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
