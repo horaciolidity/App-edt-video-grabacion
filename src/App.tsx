@@ -27,6 +27,7 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<StudioTab>('home');
   const [isExportOpen, setIsExportOpen] = useState<boolean>(false);
   const [isMobileDeviceView, setIsMobileDeviceView] = useState<boolean>(false);
+  const [appliedFilterId, setAppliedFilterId] = useState<string>('normal');
 
   // Initialize projects on mount
   useEffect(() => {
@@ -96,6 +97,7 @@ export default function App() {
             onTakeRecorded={handleTakeRecorded}
             onNavigateTab={setCurrentTab}
             initialBeat={activeProject.backingBeat}
+            initialFilterId={appliedFilterId}
           />
         );
 
@@ -113,6 +115,7 @@ export default function App() {
             project={activeProject}
             onUpdateProject={handleUpdateProject}
             onOpenExport={() => setIsExportOpen(true)}
+            onNavigateTab={setCurrentTab}
           />
         );
 
@@ -131,8 +134,12 @@ export default function App() {
       case 'effects':
         return (
           <EffectsLibrary
-            onApplyFilter={(_fid) => {}}
+            onApplyFilter={(fid) => {
+              setAppliedFilterId(fid);
+              setCurrentTab('camera');
+            }}
             onNavigateTab={setCurrentTab}
+            activeFilterId={appliedFilterId}
           />
         );
 

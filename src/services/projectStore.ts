@@ -141,6 +141,28 @@ export function addTakeToProject(project: Project, take: ProjectTake): Project {
   };
 
   const updatedClips = [...project.clips, newClip];
+
+  // If take was recorded with custom music, also insert the music clip into tr_beat
+  if (take.beatAudioUrl) {
+    const musicClip: MediaClip = {
+      id: 'clip_music_' + take.id,
+      trackId: 'tr_beat',
+      name: take.beatName || 'Backing Music',
+      type: 'audio',
+      src: take.beatAudioUrl,
+      startTime: 0,
+      duration: Math.max(3, take.duration),
+      trimStart: take.beatStartTime || 0,
+      trimEnd: (take.beatStartTime || 0) + Math.max(3, take.duration),
+      volume: 0.9,
+      speed: 1,
+      isMuted: false,
+      transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+      filterIntensity: 0
+    };
+    updatedClips.push(musicClip);
+  }
+
   const newDuration = Math.max(project.duration, take.duration);
 
   const updatedProject = {

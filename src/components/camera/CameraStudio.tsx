@@ -17,9 +17,18 @@ import {
   Layers,
   ChevronRight,
   Sun,
-  RotateCcw
+  RotateCcw,
+  ArrowLeft,
+  Upload,
+  Disc,
+  Trash2,
+  FileAudio,
+  Clock,
+  Settings2,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
-import { ChromaKeySettings, ProjectTake, BackingBeat, StudioTab } from '../../types';
+import { ChromaKeySettings, ProjectTake, BackingBeat, StudioTab, Resolution } from '../../types';
 import {
   DEFAULT_CHROMA_SETTINGS,
   CHROMA_COLOR_PRESETS,
@@ -30,16 +39,29 @@ import {
 import { ChromaKeyEngine } from '../../services/chromaKeyEngine';
 import { beatSynthesizer } from '../../services/beatSynthesizer';
 
+interface ImportedTrack {
+  id: string;
+  title: string;
+  fileName: string;
+  duration: number;
+  url: string;
+  addedAt: number;
+}
+
+const IMPORTED_MUSIC_STORAGE_KEY = 'vibestudio_imported_music_v1';
+
 interface CameraStudioProps {
   onTakeRecorded: (take: ProjectTake) => void;
   onNavigateTab: (tab: StudioTab) => void;
   initialBeat?: BackingBeat;
+  initialFilterId?: string;
 }
 
 export const CameraStudio: React.FC<CameraStudioProps> = ({
   onTakeRecorded,
   onNavigateTab,
-  initialBeat = PRESET_BEATS[0]
+  initialBeat = PRESET_BEATS[0],
+  initialFilterId = 'normal'
 }) => {
   // Camera & Stream State
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -47,6 +69,14 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   const [torchOn, setTorchOn] = useState<boolean>(false);
   const [isSimulatedCamera, setIsSimulatedCamera] = useState<boolean>(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+
+  // 1. Camera Recording Quality Configuration (Target 1080p FHD)
+  const [recordingQuality, setRecordingQuality] = useState<Resolution>('1080p');
+  const [actualStreamResolution, setActualStreamResolution] = useState<{ width: number; height: number; fps: number }>({
+    width: 1080,
+    height: 1920,
+    fps: 30
+  });
 
   // Recording State
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -59,18 +89,29 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   // Chroma Key Settings
   const [chromaSettings, setChromaSettings] = useState<ChromaKeySettings>(DEFAULT_CHROMA_SETTINGS);
   const [isEyedropperActive, setIsEyedropperActive] = useState<boolean>(false);
+
+  // Modals & Panels
   const [showChromaPanel, setShowChromaPanel] = useState<boolean>(false);
   const [showFiltersPanel, setShowFiltersPanel] = useState<boolean>(false);
   const [showAudioPanel, setShowAudioPanel] = useState<boolean>(false);
+  const [showQualityMenu, setShowQualityMenu] = useState<boolean>(false);
 
-  // Filter State
-  const [activeFilterId, setActiveFilterId] = useState<string>('normal');
+  // Filter State & In-Panel Sub-Navigation
+  const [activeFilterId, setActiveFilterId] = useState<string>(initialFilterId);
   const [filterIntensity, setFilterIntensity] = useState<number>(0.75);
+  const [fxCategoryFilter, setFxCategoryFilter] = useState<string>('all');
+  const [fxPanelSubView, setFxPanelSubView] = useState<'list' | 'tune'>('list');
 
-  // Backing Track State
+  // Backing Track & Custom Music State
+  const [musicSourceType, setMusicSourceType] = useState<'beats' | 'custom'>('beats');
   const [selectedBeat, setSelectedBeat] = useState<BackingBeat>(initialBeat);
-  const [isBeatPlaying, setIsBeatPlaying] = useState<boolean>(false);
+  const [importedTracks, setImportedTracks] = useState<ImportedTrack[]>([]);
+  const [selectedCustomTrack, setSelectedCustomTrack] = useState<ImportedTrack | null>(null);
+  const [customCueStart, setCustomCueStart] = useState<number>(0); // Starting playback position in seconds
+  const [isMusicPreviewing, setIsMusicPreviewing] = useState<boolean>(false);
+  const [musicPreviewCurrentTime, setMusicPreviewCurrentTime] = useState<number>(0);
   const [latencyOffsetMs, setLatencyOffsetMs] = useState<number>(0);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // DOM Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -83,6 +124,37 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const simAnimFrameRef = useRef<number | null>(null);
+  const customAudioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const musicFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(prev => (prev === msg ? null : prev));
+    }, 2500);
+  };
+
+  // Sync initialFilterId when prop changes
+  useEffect(() => {
+    if (initialFilterId) {
+      setActiveFilterId(initialFilterId);
+    }
+  }, [initialFilterId]);
+
+  // Load saved custom music tracks from localStorage on mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(IMPORTED_MUSIC_STORAGE_KEY);
+      if (stored) {
+        const parsed: ImportedTrack[] = JSON.parse(stored);
+        if (parsed.length > 0) {
+          setImportedTracks(parsed);
+        }
+      }
+    } catch {
+      // Ignore storage read error
+    }
+  }, []);
 
   // Initialize WebGL Chroma Engine
   useEffect(() => {
@@ -101,8 +173,21 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     }
   }, [chromaSettings.backgroundSrc]);
 
-  // Start Hardware Camera Stream or Fallback Simulation
-  const startCamera = useCallback(async (facing: 'user' | 'environment') => {
+  // Get Target Resolution Dimensions
+  const getResolutionDimensions = useCallback((res: Resolution) => {
+    switch (res) {
+      case '1080p':
+        return { width: 1080, height: 1920, bitrate: 10_000_000 };
+      case '720p':
+        return { width: 720, height: 1280, bitrate: 5_000_000 };
+      case '480p':
+      default:
+        return { width: 480, height: 854, bitrate: 2_500_000 };
+    }
+  }, []);
+
+  // Start Hardware Camera Stream with 1080p target & advanced constraints
+  const startCamera = useCallback(async (facing: 'user' | 'environment', quality: Resolution) => {
     try {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
@@ -110,21 +195,63 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       }
 
       setPermissionError(null);
+      const targetRes = getResolutionDimensions(quality);
+
       const constraints: MediaStreamConstraints = {
         video: {
           facingMode: { ideal: facing },
-          width: { ideal: 1080 },
-          height: { ideal: 1920 },
+          width: { ideal: targetRes.width, min: 480, max: 1920 },
+          height: { ideal: targetRes.height, min: 854, max: 1920 },
+          aspectRatio: { ideal: 9 / 16 },
+          frameRate: { ideal: 30, max: 60 }
         },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          channelCount: 2,
+          sampleRate: 48000
         }
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        // Inspect real settings
+        const settings = videoTrack.getSettings();
+        setActualStreamResolution({
+          width: settings.width || targetRes.width,
+          height: settings.height || targetRes.height,
+          fps: Math.round(settings.frameRate || 30)
+        });
+
+        // Apply hardware camera enhancements where supported (autofocus, exposure, stabilization)
+        if (typeof videoTrack.getCapabilities === 'function') {
+          const caps = (videoTrack.getCapabilities() as Record<string, unknown>) || {};
+          const advancedConstraint: Record<string, unknown> = {};
+
+          if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+            advancedConstraint.focusMode = 'continuous';
+          }
+          if (Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) {
+            advancedConstraint.exposureMode = 'continuous';
+          }
+          if (Array.isArray(caps.whiteBalanceMode) && caps.whiteBalanceMode.includes('continuous')) {
+            advancedConstraint.whiteBalanceMode = 'continuous';
+          }
+          if (caps.imageStabilization) {
+            advancedConstraint.imageStabilization = true;
+          }
+
+          if (Object.keys(advancedConstraint).length > 0) {
+            videoTrack.applyConstraints({
+              advanced: [advancedConstraint as MediaTrackConstraintSet]
+            }).catch(() => {});
+          }
+        }
+      }
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -134,23 +261,26 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     } catch (err: unknown) {
       console.warn('Physical camera unavailable, enabling high-res simulated studio feed:', err);
       setIsSimulatedCamera(true);
-      setPermissionError('Hardware camera unavailable or permission denied. Simulated green-screen studio feed active.');
+      setPermissionError('Camera unavailable or permission denied. Simulated studio feed active.');
     }
-  }, []);
+  }, [getResolutionDimensions]);
 
   useEffect(() => {
-    startCamera(facingMode);
+    startCamera(facingMode, recordingQuality);
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
       }
       beatSynthesizer.stop();
+      if (customAudioPlayerRef.current) {
+        customAudioPlayerRef.current.pause();
+      }
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       if (simAnimFrameRef.current) cancelAnimationFrame(simAnimFrameRef.current);
     };
-  }, [facingMode, startCamera]);
+  }, [facingMode, recordingQuality, startCamera]);
 
-  // Simulated Camera Canvas Animation (Generates real dynamic green-screen performer)
+  // High-Resolution Simulated Camera Canvas Animation
   useEffect(() => {
     if (!isSimulatedCamera) return;
 
@@ -159,51 +289,51 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     const ctx = simCanvas.getContext('2d');
     if (!ctx) return;
 
-    let time = 0;
+    let angle = 0;
     const renderSim = () => {
-      time += 0.04;
+      angle += 0.035;
       const w = simCanvas.width;
       const h = simCanvas.height;
 
-      // 1. Draw solid key color (Green screen studio background by default or selected color)
+      // Studio Green background
       ctx.fillStyle = chromaSettings.keyColor || '#00ff00';
       ctx.fillRect(0, 0, w, h);
 
-      // 2. Draw animated artist / singer performing in front of green screen
-      const centerX = w / 2 + Math.sin(time * 0.8) * 15;
-      const baseY = h * 0.72 + Math.cos(time * 1.6) * 8;
-
+      // Draw simulated performer silhouette
       ctx.save();
-      // Body / Jacket (Dark silhouette with neon rims)
-      ctx.fillStyle = '#1e1b4b';
+      const centerX = w / 2 + Math.sin(angle * 1.5) * 35;
+      const centerY = h * 0.58 + Math.cos(angle * 2) * 12;
+
+      // Body & Hoodie
+      ctx.fillStyle = '#0f172a';
       ctx.beginPath();
-      ctx.ellipse(centerX, baseY + 90, 130, 210, 0, 0, Math.PI * 2);
+      ctx.ellipse(centerX, centerY + 180, 220, 320, 0, 0, Math.PI * 2);
       ctx.fill();
 
       // Head
-      ctx.fillStyle = '#c2410c'; // Skin tone
+      ctx.fillStyle = '#f87171';
       ctx.beginPath();
-      ctx.arc(centerX, baseY - 90, 65, 0, Math.PI * 2);
+      ctx.arc(centerX, centerY - 140, 100, 0, Math.PI * 2);
       ctx.fill();
 
-      // Cap / Headphones
-      ctx.fillStyle = '#0f172a';
+      // Cap
+      ctx.fillStyle = '#9333ea';
       ctx.beginPath();
-      ctx.arc(centerX, baseY - 110, 70, Math.PI, Math.PI * 2);
+      ctx.arc(centerX, centerY - 170, 108, Math.PI, Math.PI * 2);
       ctx.fill();
+      ctx.fillRect(centerX - 130, centerY - 175, 260, 28);
 
-      // Studio Microphone in hand
-      const micX = centerX + Math.sin(time * 1.5) * 35 - 30;
-      const micY = baseY - 60;
-      ctx.fillStyle = '#94a3b8';
-      ctx.fillRect(micX - 8, micY, 16, 80);
-      ctx.fillStyle = '#475569';
+      // Microphone in hand
+      const micX = centerX + 110 + Math.sin(angle * 2) * 15;
+      const micY = centerY - 20 + Math.cos(angle * 1.8) * 20;
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(micX - 10, micY, 20, 90);
+      ctx.fillStyle = '#64748b';
       ctx.beginPath();
-      ctx.arc(micX, micY - 5, 20, 0, Math.PI * 2);
+      ctx.arc(micX, micY - 8, 26, 0, Math.PI * 2);
       ctx.fill();
 
       ctx.restore();
-
       simAnimFrameRef.current = requestAnimationFrame(renderSim);
     };
 
@@ -213,7 +343,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     };
   }, [isSimulatedCamera, chromaSettings.keyColor]);
 
-  // Main Render Loop: Feeds Video or Simulated Canvas into WebGL Chroma Key Pipeline
+  // Main Render Loop: Feeds Video/Simulated Canvas into WebGL Chroma Key Pipeline
   useEffect(() => {
     const loop = () => {
       const source = isSimulatedCamera ? simulatedCanvasRef.current : videoRef.current;
@@ -267,7 +397,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
           });
           setTorchOn(!torchOn);
         } catch {
-          // torch unsupported on this device
+          showToast('Flashlight not supported on this lens');
         }
       }
     }
@@ -279,6 +409,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     const hex = engineRef.current.pickColorAt(e.clientX, e.clientY);
     setChromaSettings(prev => ({ ...prev, keyColor: hex, enabled: true }));
     setIsEyedropperActive(false);
+    showToast(`Key color set: ${hex.toUpperCase()}`);
   };
 
   // Custom Background Upload
@@ -293,10 +424,108 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         backgroundSrc: url,
         backgroundName: file.name
       }));
+      showToast('Custom backdrop loaded');
     }
   };
 
-  // Trigger Recording with 3-2-1 Countdown & Backing Beat Sync
+  // 2. Custom Music Import Handler (MP3, WAV, M4A, AAC, OGG)
+  const handleImportMusicFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate audio file
+    if (!file.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac|ogg)$/i.test(file.name)) {
+      showToast('Please select a valid audio file (MP3, WAV, M4A, AAC)');
+      return;
+    }
+
+    try {
+      const audioUrl = URL.createObjectURL(file);
+      const testAudio = new Audio(audioUrl);
+
+      testAudio.onloadedmetadata = () => {
+        const duration = Math.round(testAudio.duration || 60);
+        const newTrack: ImportedTrack = {
+          id: 'music_' + Date.now(),
+          title: file.name.replace(/\.[^/.]+$/, ''),
+          fileName: file.name,
+          duration,
+          url: audioUrl,
+          addedAt: Date.now()
+        };
+
+        const updated = [newTrack, ...importedTracks.filter(t => t.fileName !== file.name)];
+        setImportedTracks(updated);
+        setSelectedCustomTrack(newTrack);
+        setCustomCueStart(0);
+        setMusicSourceType('custom');
+
+        try {
+          // Store track metadata in localStorage
+          localStorage.setItem(IMPORTED_MUSIC_STORAGE_KEY, JSON.stringify(updated.slice(0, 10)));
+        } catch {
+          // Ignore storage quota
+        }
+
+        showToast(`Imported: ${newTrack.title}`);
+      };
+
+      testAudio.onerror = () => {
+        showToast('Could not decode audio file. Try another format.');
+      };
+    } catch {
+      showToast('Error reading audio file.');
+    }
+
+    // Reset input
+    if (musicFileInputRef.current) {
+      musicFileInputRef.current.value = '';
+    }
+  };
+
+  // Music Preview Toggle
+  const handleToggleMusicPreview = () => {
+    if (musicSourceType === 'beats') {
+      if (isMusicPreviewing) {
+        beatSynthesizer.stop();
+        setIsMusicPreviewing(false);
+      } else {
+        beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
+        setIsMusicPreviewing(true);
+      }
+    } else if (selectedCustomTrack && customAudioPlayerRef.current) {
+      const player = customAudioPlayerRef.current;
+      if (isMusicPreviewing) {
+        player.pause();
+        setIsMusicPreviewing(false);
+      } else {
+        player.currentTime = customCueStart;
+        player.play().catch(() => {});
+        setIsMusicPreviewing(true);
+      }
+    }
+  };
+
+  // Remove imported custom track
+  const handleRemoveCustomTrack = (trackId: string) => {
+    const remaining = importedTracks.filter(t => t.id !== trackId);
+    setImportedTracks(remaining);
+    try {
+      localStorage.setItem(IMPORTED_MUSIC_STORAGE_KEY, JSON.stringify(remaining));
+    } catch {}
+
+    if (selectedCustomTrack?.id === trackId) {
+      if (remaining.length > 0) {
+        setSelectedCustomTrack(remaining[0]);
+      } else {
+        setSelectedCustomTrack(null);
+        setMusicSourceType('beats');
+      }
+    }
+    showToast('Track removed');
+  };
+
+  // 3. Trigger Recording with Countdown & Music Playback Sync
   const handleStartCountdown = () => {
     if (isRecording) return;
     setCountdown(3);
@@ -315,25 +544,29 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
   const startActualRecording = () => {
     if (!canvasRef.current) return;
 
-    // Start backing beat in sync
-    beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
-    setIsBeatPlaying(true);
+    // Start music playback in sync
+    if (musicSourceType === 'beats') {
+      beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
+    } else if (selectedCustomTrack && customAudioPlayerRef.current) {
+      const player = customAudioPlayerRef.current;
+      player.currentTime = customCueStart;
+      player.play().catch(() => {});
+    }
 
-    // Stream from composited canvas + audio destination
-    const canvasStream = canvasRef.current.captureStream(30);
-    const audioDest = beatSynthesizer.getStreamDestination();
+    // Capture canvas stream at optimal framerate
+    const targetFps = actualStreamResolution.fps || 30;
+    const canvasStream = canvasRef.current.captureStream(targetFps);
     const tracks = [...canvasStream.getVideoTracks()];
 
-    // Add mic audio track if available
+    // Add microphone audio track from hardware stream
     if (streamRef.current && streamRef.current.getAudioTracks().length > 0) {
       tracks.push(streamRef.current.getAudioTracks()[0]);
-    } else if (audioDest && audioDest.stream.getAudioTracks().length > 0) {
-      tracks.push(audioDest.stream.getAudioTracks()[0]);
     }
 
     const recordStream = new MediaStream(tracks);
     recordedChunksRef.current = [];
 
+    // Select optimal mimeType
     let mimeType = 'video/webm;codecs=vp9,opus';
     if (!MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = 'video/webm;codecs=vp8,opus';
@@ -345,8 +578,20 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       }
     }
 
+    const qualityConfig = getResolutionDimensions(recordingQuality);
+
     try {
-      const recorder = mimeType ? new MediaRecorder(recordStream, { mimeType }) : new MediaRecorder(recordStream);
+      const recorder = mimeType
+        ? new MediaRecorder(recordStream, {
+            mimeType,
+            videoBitsPerSecond: qualityConfig.bitrate,
+            audioBitsPerSecond: 192_000
+          })
+        : new MediaRecorder(recordStream, {
+            videoBitsPerSecond: qualityConfig.bitrate,
+            audioBitsPerSecond: 192_000
+          });
+
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           recordedChunksRef.current.push(e.data);
@@ -357,15 +602,20 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         const blob = new Blob(recordedChunksRef.current, { type: mimeType || 'video/webm' });
         const videoUrl = URL.createObjectURL(blob);
         const takeNum = recordedTakes.length + 1;
+
+        const isCustom = musicSourceType === 'custom' && !!selectedCustomTrack;
         const newTake: ProjectTake = {
           id: 'take_' + Date.now(),
           takeNumber: takeNum,
-          title: `Take ${takeNum} (${selectedBeat.title})`,
+          title: `Take ${takeNum} (${isCustom ? selectedCustomTrack?.title : selectedBeat.title})`,
           createdAt: Date.now(),
           videoUrl,
           duration: recordSeconds,
-          beatId: selectedBeat.id,
-          beatName: selectedBeat.title,
+          beatId: isCustom ? selectedCustomTrack?.id : selectedBeat.id,
+          beatName: isCustom ? selectedCustomTrack?.title : selectedBeat.title,
+          beatAudioUrl: isCustom ? selectedCustomTrack?.url : undefined,
+          beatStartTime: isCustom ? customCueStart : 0,
+          isCustomMusic: isCustom,
           latencyOffsetMs,
           chromaSettings: { ...chromaSettings },
           filterId: activeFilterId
@@ -387,14 +637,20 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       }, 1000);
     } catch (e) {
       console.error('Failed to start MediaRecorder:', e);
+      showToast('Recording error. Try reducing resolution to 720p.');
     }
   };
 
   const handlePauseResume = () => {
-    if (!mediaRecorderRef.current || !isRecording) return;
+    if (!mediaRecorderRef.current) return;
     if (isPaused) {
       mediaRecorderRef.current.resume();
       setIsPaused(false);
+      if (musicSourceType === 'beats') {
+        beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
+      } else if (customAudioPlayerRef.current) {
+        customAudioPlayerRef.current.play().catch(() => {});
+      }
       recordIntervalRef.current = window.setInterval(() => {
         setRecordSeconds(s => s + 1);
       }, 1000);
@@ -402,6 +658,10 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       mediaRecorderRef.current.pause();
       setIsPaused(true);
       if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
+      beatSynthesizer.stop();
+      if (customAudioPlayerRef.current) {
+        customAudioPlayerRef.current.pause();
+      }
     }
   };
 
@@ -415,7 +675,10 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       recordIntervalRef.current = null;
     }
     beatSynthesizer.stop();
-    setIsBeatPlaying(false);
+    if (customAudioPlayerRef.current) {
+      customAudioPlayerRef.current.pause();
+    }
+    setIsMusicPreviewing(false);
   };
 
   const formatTimer = (totalSeconds: number) => {
@@ -424,8 +687,41 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const formatTimecode = (sec: number) => {
+    const mins = Math.floor(sec / 60);
+    const secs = Math.floor(sec % 60);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Dimensions for canvas
+  const canvasDims = getResolutionDimensions(recordingQuality);
+
   return (
     <div className="relative w-full h-[calc(100vh-3.5rem)] bg-black overflow-hidden flex flex-col select-none">
+      {/* Hidden audio player for custom music playback */}
+      {selectedCustomTrack && (
+        <audio
+          ref={customAudioPlayerRef}
+          src={selectedCustomTrack.url}
+          onTimeUpdate={() => {
+            if (customAudioPlayerRef.current) {
+              setMusicPreviewCurrentTime(customAudioPlayerRef.current.currentTime);
+            }
+          }}
+          onEnded={() => setIsMusicPreviewing(false)}
+          className="hidden"
+        />
+      )}
+
+      {/* Hidden file input for music picker */}
+      <input
+        ref={musicFileInputRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg"
+        onChange={handleImportMusicFile}
+        className="hidden"
+      />
+
       {/* Hidden raw video & fallback simulated canvas */}
       <video
         ref={videoRef}
@@ -435,17 +731,25 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
       />
       <canvas
         ref={simulatedCanvasRef}
-        width={720}
-        height={1280}
+        width={canvasDims.width}
+        height={canvasDims.height}
         className="hidden"
       />
 
-      {/* Main Viewfinder Canvas (WebGL Composited Stream) */}
+      {/* Toast Notification Container */}
+      {toastMessage && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 border border-purple-500 text-white text-xs font-semibold px-4 py-2 rounded-full shadow-2xl backdrop-blur-md flex items-center gap-2 pointer-events-none animate-fade-in">
+          <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Main Viewfinder Canvas (WebGL Composited Stream at Target Quality) */}
       <div className="relative flex-1 w-full h-full flex items-center justify-center bg-black overflow-hidden">
         <canvas
           ref={canvasRef}
-          width={720}
-          height={1280}
+          width={canvasDims.width}
+          height={canvasDims.height}
           onClick={handleCanvasClick}
           className={`max-h-full max-w-full aspect-[9/16] object-contain shadow-2xl transition-transform ${
             isEyedropperActive ? 'cursor-crosshair ring-2 ring-cyan-400' : ''
@@ -473,8 +777,8 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         )}
 
         {/* Top Viewfinder Floating HUD */}
-        <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-20 pointer-events-none">
-          {/* Status info */}
+        <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-20 pointer-events-none">
+          {/* Status info & Quality pill */}
           <div className="pointer-events-auto flex items-center gap-2">
             {isRecording ? (
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-600/90 text-white text-xs font-bold tracking-wider shadow-lg shadow-red-600/30">
@@ -482,25 +786,65 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                 <span>REC {formatTimer(recordSeconds)}</span>
               </div>
             ) : (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-700/60 text-slate-200 text-xs font-medium backdrop-blur-md">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                <span>STANDBY · 1080p 30fps</span>
+              <div className="relative">
+                <button
+                  onClick={() => setShowQualityMenu(!showQualityMenu)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-700/80 text-slate-200 text-xs font-medium backdrop-blur-md hover:bg-slate-800 transition-colors cursor-pointer"
+                  title="Select Camera Recording Quality"
+                >
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  <span className="font-bold text-white">{recordingQuality}</span>
+                  <span className="text-slate-400 font-mono text-[10px]">
+                    {actualStreamResolution.fps}fps
+                  </span>
+                </button>
+
+                {/* Quality Switcher Dropdown */}
+                {showQualityMenu && (
+                  <div className="absolute top-9 left-0 w-44 bg-slate-950/95 border border-slate-800 rounded-xl p-1.5 shadow-2xl backdrop-blur-xl z-50">
+                    <div className="text-[10px] text-slate-400 px-2 py-1 uppercase font-mono font-bold">
+                      Capture Resolution
+                    </div>
+                    {(['1080p', '720p', '480p'] as Resolution[]).map((res) => (
+                      <button
+                        key={res}
+                        onClick={() => {
+                          setRecordingQuality(res);
+                          setShowQualityMenu(false);
+                          showToast(`Quality set to ${res}`);
+                        }}
+                        className={`w-full text-left px-2 py-1.5 rounded-lg text-xs flex items-center justify-between cursor-pointer transition-colors ${
+                          recordingQuality === res
+                            ? 'bg-purple-600 text-white font-bold'
+                            : 'text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        <span>{res === '1080p' ? '1080p Full HD' : res === '720p' ? '720p HD' : '480p SD'}</span>
+                        {recordingQuality === res && <Check className="w-3.5 h-3.5" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
-            {isSimulatedCamera && (
-              <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] backdrop-blur-md">
-                <span>Studio Sim Feed</span>
-              </div>
-            )}
+            {/* Active Music Badge */}
+            <div className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-900/80 border border-slate-700/60 text-cyan-300 text-[11px] backdrop-blur-md max-w-[150px] truncate">
+              <Music className="w-3 h-3 text-cyan-400 shrink-0" />
+              <span className="truncate">
+                {musicSourceType === 'custom' && selectedCustomTrack
+                  ? selectedCustomTrack.title
+                  : selectedBeat.title}
+              </span>
+            </div>
           </div>
 
           {/* Quick controls on top right */}
-          <div className="pointer-events-auto flex items-center gap-2">
+          <div className="pointer-events-auto flex items-center gap-1.5">
             {/* Flash / Torch */}
             <button
               onClick={handleToggleTorch}
-              className={`min-h-[44px] min-w-[44px] rounded-full p-2.5 backdrop-blur-md border transition-all cursor-pointer ${
+              className={`min-h-[40px] min-w-[40px] rounded-full p-2 backdrop-blur-md border transition-all cursor-pointer flex items-center justify-center ${
                 torchOn ? 'bg-amber-500 text-black border-amber-400' : 'bg-slate-900/80 text-slate-300 border-slate-700/60 hover:text-white'
               }`}
               title="Torch / Flash"
@@ -511,7 +855,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
             {/* Flip camera */}
             <button
               onClick={handleToggleCamera}
-              className="min-h-[44px] min-w-[44px] rounded-full p-2.5 bg-slate-900/80 border border-slate-700/60 text-slate-300 hover:text-white backdrop-blur-md transition-all active:rotate-180 cursor-pointer"
+              className="min-h-[40px] min-w-[40px] rounded-full p-2 bg-slate-900/80 border border-slate-700/60 text-slate-300 hover:text-white backdrop-blur-md transition-all active:rotate-180 cursor-pointer flex items-center justify-center"
               title="Switch Front/Rear Camera"
             >
               <RefreshCw className="w-4 h-4" />
@@ -520,7 +864,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
         </div>
 
         {/* Right Action Rail (Snapchat-style floating tools) */}
-        <div className="absolute right-4 top-20 bottom-36 flex flex-col items-center justify-center gap-3 z-20">
+        <div className="absolute right-3 top-16 bottom-32 flex flex-col items-center justify-center gap-2.5 z-20">
           {/* Chroma Key Panel Toggle */}
           <button
             onClick={() => {
@@ -528,14 +872,14 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               setShowFiltersPanel(false);
               setShowAudioPanel(false);
             }}
-            className={`min-h-[44px] min-w-[44px] rounded-full p-3 flex flex-col items-center justify-center gap-1 backdrop-blur-md border transition-all cursor-pointer ${
+            className={`min-h-[44px] min-w-[44px] rounded-full p-2.5 flex flex-col items-center justify-center gap-0.5 backdrop-blur-md border transition-all cursor-pointer ${
               chromaSettings.enabled || showChromaPanel
                 ? 'bg-purple-600 border-purple-400 text-white shadow-lg shadow-purple-600/40'
-                : 'bg-slate-900/80 border-slate-700/60 text-slate-300 hover:text-white'
+                : 'bg-slate-900/85 border-slate-700/60 text-slate-300 hover:text-white'
             }`}
             title="Chroma Key Studio"
           >
-            <Layers className="w-5 h-5" />
+            <Layers className="w-4 h-4" />
             <span className="text-[9px] font-semibold">Key</span>
           </button>
 
@@ -545,34 +889,35 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
               setShowFiltersPanel(!showFiltersPanel);
               setShowChromaPanel(false);
               setShowAudioPanel(false);
+              setFxPanelSubView('list');
             }}
-            className={`min-h-[44px] min-w-[44px] rounded-full p-3 flex flex-col items-center justify-center gap-1 backdrop-blur-md border transition-all cursor-pointer ${
+            className={`min-h-[44px] min-w-[44px] rounded-full p-2.5 flex flex-col items-center justify-center gap-0.5 backdrop-blur-md border transition-all cursor-pointer ${
               activeFilterId !== 'normal' || showFiltersPanel
                 ? 'bg-pink-600 border-pink-400 text-white shadow-lg shadow-pink-600/40'
-                : 'bg-slate-900/80 border-slate-700/60 text-slate-300 hover:text-white'
+                : 'bg-slate-900/85 border-slate-700/60 text-slate-300 hover:text-white'
             }`}
             title="Artist Visual Filters"
           >
-            <Sparkles className="w-5 h-5" />
+            <Sparkles className="w-4 h-4" />
             <span className="text-[9px] font-semibold">FX</span>
           </button>
 
-          {/* Karaoke Beat Toggle */}
+          {/* Music / Beat Toggle */}
           <button
             onClick={() => {
               setShowAudioPanel(!showAudioPanel);
               setShowChromaPanel(false);
               setShowFiltersPanel(false);
             }}
-            className={`min-h-[44px] min-w-[44px] rounded-full p-3 flex flex-col items-center justify-center gap-1 backdrop-blur-md border transition-all cursor-pointer ${
-              isBeatPlaying || showAudioPanel
+            className={`min-h-[44px] min-w-[44px] rounded-full p-2.5 flex flex-col items-center justify-center gap-0.5 backdrop-blur-md border transition-all cursor-pointer ${
+              isMusicPreviewing || showAudioPanel
                 ? 'bg-cyan-600 border-cyan-400 text-white shadow-lg shadow-cyan-600/40'
-                : 'bg-slate-900/80 border-slate-700/60 text-slate-300 hover:text-white'
+                : 'bg-slate-900/85 border-slate-700/60 text-slate-300 hover:text-white'
             }`}
-            title="Backing Beat & Karaoke"
+            title="Backing Music & Custom Audio"
           >
-            <Music className="w-5 h-5" />
-            <span className="text-[9px] font-semibold">Beat</span>
+            <Music className="w-4 h-4" />
+            <span className="text-[9px] font-semibold">Music</span>
           </button>
 
           {/* Zoom Selector */}
@@ -591,14 +936,24 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
           </div>
         </div>
 
-        {/* Sliding Contextual Panel: Real-time Chroma Key Studio */}
+        {/* 4. Sliding Contextual Panel: CHROMA KEY (With Clear Top-Left Back Button) */}
         {showChromaPanel && (
-          <div className="absolute left-4 right-4 bottom-28 md:left-auto md:right-20 md:w-96 bg-slate-950/95 border border-purple-500/40 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[70vh] overflow-y-auto">
+          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-96 bg-slate-950/95 border border-purple-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[72vh] overflow-y-auto">
+            {/* Header with Top-Left Back Navigation */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <button
+                onClick={() => setShowChromaPanel(false)}
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
+                title="Return to Camera"
+              >
+                <ArrowLeft className="w-4 h-4 text-purple-400" />
+                <span>Back</span>
+              </button>
+
               <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-purple-400" />
-                <h3 className="text-sm font-semibold text-white">Chroma Key Studio</h3>
+                <span className="text-xs font-bold text-white">Chroma Key Studio</span>
               </div>
+
               <label className="relative inline-flex items-center cursor-pointer">
                 <input
                   type="checkbox"
@@ -613,7 +968,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
             <div className="space-y-4 pt-3 text-xs">
               {/* Color Selection & Eyedropper */}
               <div>
-                <label className="text-slate-400 font-medium block mb-1.5">Key Color</label>
+                <label className="text-slate-400 font-medium block mb-1.5">Key Screen Color</label>
                 <div className="flex items-center gap-2 flex-wrap">
                   {CHROMA_COLOR_PRESETS.map((color) => (
                     <button
@@ -621,7 +976,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                       onClick={() => setChromaSettings(prev => ({ ...prev, keyColor: color.hex, enabled: true }))}
                       className={`h-7 px-2.5 rounded-lg border flex items-center gap-1.5 text-[11px] font-medium transition-all cursor-pointer ${
                         chromaSettings.keyColor.toLowerCase() === color.hex.toLowerCase()
-                          ? 'border-purple-400 bg-purple-950/50 text-white'
+                          ? 'border-purple-400 bg-purple-950/70 text-white font-bold'
                           : 'border-slate-800 bg-slate-900 text-slate-300 hover:border-slate-700'
                       }`}
                     >
@@ -630,7 +985,6 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                     </button>
                   ))}
 
-                  {/* Eyedropper tool */}
                   <button
                     onClick={() => {
                       setIsEyedropperActive(!isEyedropperActive);
@@ -661,7 +1015,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                   step="0.02"
                   value={chromaSettings.tolerance}
                   onChange={(e) => setChromaSettings(prev => ({ ...prev, tolerance: parseFloat(e.target.value) }))}
-                  className="w-full accent-purple-500"
+                  className="w-full accent-purple-500 cursor-pointer"
                 />
               </div>
 
@@ -677,7 +1031,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                   step="0.01"
                   value={chromaSettings.softness}
                   onChange={(e) => setChromaSettings(prev => ({ ...prev, softness: parseFloat(e.target.value) }))}
-                  className="w-full accent-purple-500"
+                  className="w-full accent-purple-500 cursor-pointer"
                 />
               </div>
 
@@ -693,7 +1047,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                   step="0.05"
                   value={chromaSettings.spillReduction}
                   onChange={(e) => setChromaSettings(prev => ({ ...prev, spillReduction: parseFloat(e.target.value) }))}
-                  className="w-full accent-purple-500"
+                  className="w-full accent-purple-500 cursor-pointer"
                 />
               </div>
 
@@ -725,7 +1079,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                           backgroundSrc: bg.src,
                           backgroundName: bg.name
                         }))}
-                        className={`group relative h-20 rounded-xl overflow-hidden border text-left cursor-pointer transition-all ${
+                        className={`group relative h-16 rounded-xl overflow-hidden border text-left cursor-pointer transition-all ${
                           isSelected ? 'border-purple-400 ring-2 ring-purple-500/50' : 'border-slate-800 hover:border-slate-700'
                         }`}
                       >
@@ -734,13 +1088,13 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
                           alt={bg.name}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                         />
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent p-2 flex flex-col justify-end">
-                          <span className="text-[11px] font-bold text-white truncate">{bg.name}</span>
-                          <span className="text-[9px] text-slate-300 truncate">{bg.genre}</span>
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent p-1.5 flex flex-col justify-end">
+                          <span className="text-[10px] font-bold text-white truncate">{bg.name}</span>
+                          <span className="text-[8px] text-slate-300 truncate">{bg.genre}</span>
                         </div>
                         {isSelected && (
-                          <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-purple-600 flex items-center justify-center">
-                            <Check className="w-2.5 h-2.5 text-white" />
+                          <div className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-purple-600 flex items-center justify-center">
+                            <Check className="w-2 h-2 text-white" />
                           </div>
                         )}
                       </button>
@@ -752,141 +1106,408 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
           </div>
         )}
 
-        {/* Sliding Contextual Panel: Live Artist Filters */}
+        {/* 5. Sliding Contextual Panel: LIVE ARTIST FILTERS (With Top-Left Back Navigation & Parameter Sub-View) */}
         {showFiltersPanel && (
-          <div className="absolute left-4 right-4 bottom-28 md:left-auto md:right-20 md:w-88 bg-slate-950/95 border border-pink-500/40 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[70vh] overflow-y-auto">
+          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-92 bg-slate-950/95 border border-pink-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[72vh] overflow-y-auto">
+            {/* Header with Top-Left Back Navigation */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-pink-400" />
-                <h3 className="text-sm font-semibold text-white">Artist Visual Filters</h3>
+              {fxPanelSubView === 'tune' ? (
+                <button
+                  onClick={() => setFxPanelSubView('list')}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
+                  title="Return to FX List"
+                >
+                  <ArrowLeft className="w-4 h-4 text-pink-400" />
+                  <span>Back to Filters</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowFiltersPanel(false)}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
+                  title="Return to Camera"
+                >
+                  <ArrowLeft className="w-4 h-4 text-pink-400" />
+                  <span>Back to Camera</span>
+                </button>
+              )}
+
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-pink-400" />
+                <span className="text-xs font-bold text-white">
+                  {fxPanelSubView === 'tune' ? 'Effect Fine-Tuning' : 'Artist Visual Filters'}
+                </span>
               </div>
+
               <button
-                onClick={() => setActiveFilterId('normal')}
+                onClick={() => {
+                  setActiveFilterId('normal');
+                  showToast('Reset to Raw Studio');
+                }}
                 className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
               >
                 Reset
               </button>
             </div>
 
-            <div className="space-y-4 pt-3 text-xs">
-              <div>
-                <div className="flex justify-between text-slate-400 mb-1">
-                  <span>Effect Intensity</span>
-                  <span className="font-mono text-pink-300">{Math.round(filterIntensity * 100)}%</span>
+            {/* Sub-View: TUNE / INTENSITY PARAMETERS */}
+            {fxPanelSubView === 'tune' ? (
+              <div className="space-y-4 pt-3 text-xs">
+                <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-bold text-white text-xs">
+                      {ARTIST_FILTERS.find(f => f.id === activeFilterId)?.name || 'Custom Effect'}
+                    </span>
+                    <span className="font-mono text-pink-300 text-xs">
+                      {Math.round(filterIntensity * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.1"
+                    max="1.0"
+                    step="0.05"
+                    value={filterIntensity}
+                    onChange={(e) => setFilterIntensity(parseFloat(e.target.value))}
+                    className="w-full accent-pink-500 cursor-pointer mt-1"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
+                    <span>Subtle</span>
+                    <span>Standard</span>
+                    <span>Max Boost</span>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min="0.1"
-                  max="1.0"
-                  step="0.05"
-                  value={filterIntensity}
-                  onChange={(e) => setFilterIntensity(parseFloat(e.target.value))}
-                  className="w-full accent-pink-500"
-                />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      onNavigateTab('effects');
+                    }}
+                    className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 font-semibold text-xs transition-colors cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <span>Full FX Matrix</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-pink-400" />
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setFxPanelSubView('list');
+                      setShowFiltersPanel(false);
+                      showToast('Effect applied');
+                    }}
+                    className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 text-white font-semibold text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Done</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Sub-View: FILTER LIST & CATEGORIES */
+              <div className="space-y-3 pt-3 text-xs">
+                {/* Category Pills */}
+                <div className="flex items-center gap-1 overflow-x-auto pb-1">
+                  {['all', 'trap', 'hiphop', 'glitch', 'retro', 'cinematic', 'reggaeton', 'pop', 'rock'].map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() => setFxCategoryFilter(cat)}
+                      className={`px-2 py-1 rounded-md text-[10px] font-semibold whitespace-nowrap cursor-pointer transition-colors ${
+                        fxCategoryFilter === cat
+                          ? 'bg-pink-600 text-white'
+                          : 'bg-slate-900 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {cat.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Filter List */}
+                <div className="grid grid-cols-2 gap-2 max-h-[46vh] overflow-y-auto">
+                  {ARTIST_FILTERS.filter(f => fxCategoryFilter === 'all' || f.category === fxCategoryFilter).map((f) => {
+                    const isSelected = activeFilterId === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        onClick={() => {
+                          setActiveFilterId(f.id);
+                          setFxPanelSubView('tune');
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          isSelected
+                            ? 'border-pink-500 bg-pink-950/50 text-white ring-1 ring-pink-500'
+                            : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs font-bold truncate">{f.name}</span>
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: f.accentColor }} />
+                        </div>
+                        <p className="text-[10px] text-slate-400 line-clamp-1 leading-tight">
+                          {f.category}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 6. Sliding Contextual Panel: BACKING BEATS & CUSTOM MUSIC IMPORT (With Top-Left Back Navigation) */}
+        {showAudioPanel && (
+          <div className="absolute left-3 right-3 bottom-24 sm:left-auto sm:right-16 sm:w-96 bg-slate-950/95 border border-cyan-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[75vh] overflow-y-auto">
+            {/* Header with Top-Left Back Navigation */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <button
+                onClick={() => setShowAudioPanel(false)}
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white py-1 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-colors cursor-pointer"
+                title="Return to Camera"
+              >
+                <ArrowLeft className="w-4 h-4 text-cyan-400" />
+                <span>Back</span>
+              </button>
+
+              <div className="flex items-center gap-1.5">
+                <Music className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-xs font-bold text-white">Backing Track & Music</span>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                {ARTIST_FILTERS.map((f) => {
-                  const isSelected = activeFilterId === f.id;
+              {/* Preview Button */}
+              <button
+                onClick={handleToggleMusicPreview}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                  isMusicPreviewing
+                    ? 'bg-cyan-500 text-black font-bold'
+                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                }`}
+              >
+                {isMusicPreviewing ? 'Stop' : 'Preview'}
+              </button>
+            </div>
+
+            {/* Music Tabs: Built-in Beats vs My Music Import */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-900 rounded-xl my-3 text-xs font-semibold">
+              <button
+                onClick={() => {
+                  setMusicSourceType('beats');
+                  if (isMusicPreviewing) {
+                    customAudioPlayerRef.current?.pause();
+                    setIsMusicPreviewing(false);
+                  }
+                }}
+                className={`py-1.5 rounded-lg transition-colors cursor-pointer ${
+                  musicSourceType === 'beats'
+                    ? 'bg-cyan-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Beats Library ({PRESET_BEATS.length})
+              </button>
+
+              <button
+                onClick={() => {
+                  setMusicSourceType('custom');
+                  if (isMusicPreviewing) {
+                    beatSynthesizer.stop();
+                    setIsMusicPreviewing(false);
+                  }
+                }}
+                className={`py-1.5 rounded-lg transition-colors cursor-pointer ${
+                  musicSourceType === 'custom'
+                    ? 'bg-cyan-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                My Music ({importedTracks.length})
+              </button>
+            </div>
+
+            {/* TAB A: BUILT-IN BEATS */}
+            {musicSourceType === 'beats' && (
+              <div className="space-y-2 text-xs">
+                {PRESET_BEATS.map((beat) => {
+                  const isCurrent = selectedBeat.id === beat.id;
                   return (
                     <button
-                      key={f.id}
-                      onClick={() => setActiveFilterId(f.id)}
-                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                        isSelected
-                          ? 'border-pink-500 bg-pink-950/40 text-white'
+                      key={beat.id}
+                      onClick={() => {
+                        setSelectedBeat(beat);
+                        if (isMusicPreviewing) {
+                          beatSynthesizer.start(beat.synthStyle, beat.bpm);
+                        }
+                      }}
+                      className={`w-full p-2.5 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer ${
+                        isCurrent
+                          ? 'border-cyan-400 bg-cyan-950/50 text-white ring-1 ring-cyan-400'
                           : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
                       }`}
                     >
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: f.accentColor }} />
-                        <span className="text-xs font-bold truncate">{f.name}</span>
+                      <div>
+                        <div className="font-semibold text-xs text-white">{beat.title}</div>
+                        <div className="text-[10px] text-slate-400">
+                          {beat.genre} · {beat.bpm} BPM · {beat.key}
+                        </div>
                       </div>
-                      <p className="text-[10px] text-slate-400 line-clamp-2 leading-tight">
-                        {f.description}
-                      </p>
+                      {isCurrent && (
+                        <span className="text-[10px] text-cyan-400 font-mono font-bold bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
+                          SELECTED
+                        </span>
+                      )}
                     </button>
                   );
                 })}
               </div>
-            </div>
-          </div>
-        )}
+            )}
 
-        {/* Sliding Contextual Panel: Karaoke Beat & Audio Settings */}
-        {showAudioPanel && (
-          <div className="absolute left-4 right-4 bottom-28 md:left-auto md:right-20 md:w-88 bg-slate-950/95 border border-cyan-500/40 rounded-2xl p-4 shadow-2xl backdrop-blur-xl z-30 max-h-[70vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Music className="w-4 h-4 text-cyan-400" />
-                <h3 className="text-sm font-semibold text-white">Backing Beat & Sync</h3>
-              </div>
-              <button
-                onClick={() => {
-                  if (isBeatPlaying) {
-                    beatSynthesizer.stop();
-                    setIsBeatPlaying(false);
-                  } else {
-                    beatSynthesizer.start(selectedBeat.synthStyle, selectedBeat.bpm);
-                    setIsBeatPlaying(true);
-                  }
-                }}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold cursor-pointer ${
-                  isBeatPlaying ? 'bg-cyan-500 text-black' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                }`}
-              >
-                {isBeatPlaying ? 'Stop Beat' : 'Preview Beat'}
-              </button>
-            </div>
+            {/* TAB B: MY MUSIC & IMPORT */}
+            {musicSourceType === 'custom' && (
+              <div className="space-y-3 text-xs">
+                {/* System File Picker Trigger */}
+                <button
+                  onClick={() => musicFileInputRef.current?.click()}
+                  className="w-full py-2.5 px-3 rounded-xl border-2 border-dashed border-cyan-500/50 bg-cyan-950/20 hover:bg-cyan-950/40 text-cyan-200 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-sm"
+                >
+                  <Upload className="w-4 h-4 text-cyan-400" />
+                  <span>+ Import Music (MP3, WAV, M4A, AAC)</span>
+                </button>
 
-            <div className="space-y-3 pt-3 text-xs">
-              <label className="text-slate-400 font-medium block">Select Studio Backing Track</label>
-              <div className="space-y-1.5">
-                {PRESET_BEATS.map((beat) => (
-                  <button
-                    key={beat.id}
-                    onClick={() => {
-                      setSelectedBeat(beat);
-                      if (isBeatPlaying) {
-                        beatSynthesizer.start(beat.synthStyle, beat.bpm);
-                      }
-                    }}
-                    className={`w-full p-2.5 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer ${
-                      selectedBeat.id === beat.id
-                        ? 'border-cyan-400 bg-cyan-950/40 text-white'
-                        : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
-                    }`}
-                  >
-                    <div>
-                      <div className="font-semibold text-xs text-white">{beat.title}</div>
-                      <div className="text-[10px] text-slate-400">{beat.genre} · {beat.bpm} BPM · {beat.key}</div>
+                {/* Selected Custom Track Controls (Cue point & Seek) */}
+                {selectedCustomTrack ? (
+                  <div className="p-3 rounded-xl bg-slate-900/90 border border-cyan-500/40 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 pr-2">
+                        <div className="font-bold text-white text-xs truncate">
+                          {selectedCustomTrack.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          Duration: {formatTimecode(selectedCustomTrack.duration)}
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-cyan-300 font-mono font-bold bg-cyan-950 px-1.5 py-0.5 rounded border border-cyan-800 shrink-0">
+                        ACTIVE
+                      </span>
                     </div>
-                    {selectedBeat.id === beat.id && (
-                      <span className="text-[10px] text-cyan-400 font-mono font-bold">READY</span>
-                    )}
-                  </button>
-                ))}
-              </div>
 
-              {/* Latency Sync Offset */}
-              <div className="pt-2 border-t border-slate-800">
-                <div className="flex justify-between text-slate-400 mb-1">
-                  <span>Vocal Latency Compensation</span>
-                  <span className="font-mono text-cyan-300">{latencyOffsetMs} ms</span>
-                </div>
-                <input
-                  type="range"
-                  min="-150"
-                  max="150"
-                  step="5"
-                  value={latencyOffsetMs}
-                  onChange={(e) => setLatencyOffsetMs(parseInt(e.target.value))}
-                  className="w-full accent-cyan-500"
-                />
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Tip: Wear wired or low-latency headphones to prevent audio feedback bleed.
-                </p>
+                    {/* Cue Point Starting Offset Slider */}
+                    <div className="pt-2 border-t border-slate-800">
+                      <div className="flex items-center justify-between text-[11px] mb-1">
+                        <span className="text-slate-300">Start Recording At (Cue Drop):</span>
+                        <span className="font-mono text-cyan-300 font-bold">
+                          {formatTimecode(customCueStart)}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(0, selectedCustomTrack.duration - 5)}
+                        step="1"
+                        value={customCueStart}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          setCustomCueStart(val);
+                          if (customAudioPlayerRef.current) {
+                            customAudioPlayerRef.current.currentTime = val;
+                          }
+                        }}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[9px] text-slate-500 font-mono mt-0.5">
+                        <span>00:00</span>
+                        <span>{formatTimecode(selectedCustomTrack.duration)}</span>
+                      </div>
+                    </div>
+
+                    {/* Replace / Remove */}
+                    <div className="flex items-center justify-between pt-1">
+                      <button
+                        onClick={() => musicFileInputRef.current?.click()}
+                        className="text-[11px] text-slate-400 hover:text-cyan-300 cursor-pointer"
+                      >
+                        Replace file...
+                      </button>
+                      <button
+                        onClick={() => handleRemoveCustomTrack(selectedCustomTrack.id)}
+                        className="text-[11px] text-red-400 hover:text-red-300 cursor-pointer flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Remove</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800 text-center text-slate-400">
+                    <Disc className="w-8 h-8 text-slate-600 mx-auto mb-1.5" />
+                    <p className="text-xs">No personal music tracks imported yet.</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      Tap the button above to import your MP3 or backing song from your device.
+                    </p>
+                  </div>
+                )}
+
+                {/* Recently Used Tracks List */}
+                {importedTracks.length > 1 && (
+                  <div>
+                    <span className="text-[10px] uppercase font-mono font-bold text-slate-400 block mb-1.5">
+                      Recently Imported Tracks
+                    </span>
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                      {importedTracks.map((t) => (
+                        <div
+                          key={t.id}
+                          onClick={() => {
+                            setSelectedCustomTrack(t);
+                            setCustomCueStart(0);
+                            showToast(`Selected: ${t.title}`);
+                          }}
+                          className={`p-2 rounded-lg border text-left flex items-center justify-between cursor-pointer transition-colors ${
+                            selectedCustomTrack?.id === t.id
+                              ? 'border-cyan-400 bg-cyan-950/40 text-white'
+                              : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="truncate pr-2">
+                            <div className="font-semibold text-xs truncate">{t.title}</div>
+                            <div className="text-[9px] text-slate-500 font-mono">
+                              {formatTimecode(t.duration)}
+                            </div>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveCustomTrack(t.id);
+                            }}
+                            className="p-1 text-slate-500 hover:text-red-400 cursor-pointer shrink-0"
+                            title="Delete track"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
+            )}
+
+            {/* Vocal Latency Compensation */}
+            <div className="pt-3 mt-3 border-t border-slate-800 text-xs">
+              <div className="flex justify-between text-slate-400 mb-1">
+                <span>Vocal Latency Offset</span>
+                <span className="font-mono text-cyan-300">{latencyOffsetMs} ms</span>
+              </div>
+              <input
+                type="range"
+                min="-150"
+                max="150"
+                step="5"
+                value={latencyOffsetMs}
+                onChange={(e) => setLatencyOffsetMs(parseInt(e.target.value))}
+                className="w-full accent-cyan-500 cursor-pointer"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">
+                Tip: Plug in wired or low-latency headphones to hear the music while recording without microphone bleed.
+              </p>
             </div>
           </div>
         )}
@@ -900,6 +1521,7 @@ export const CameraStudio: React.FC<CameraStudioProps> = ({
             <button
               onClick={() => setActiveTakePreview(recordedTakes[0])}
               className="relative w-12 h-16 rounded-lg overflow-hidden border border-purple-500/60 group cursor-pointer shadow-lg"
+              title="Preview latest recorded take"
             >
               <video
                 src={recordedTakes[0].videoUrl}

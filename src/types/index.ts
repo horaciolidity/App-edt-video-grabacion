@@ -78,6 +78,9 @@ export interface ProjectTake {
   duration: number;
   beatId?: string;
   beatName?: string;
+  beatAudioUrl?: string;
+  beatStartTime?: number;
+  isCustomMusic?: boolean;
   latencyOffsetMs: number;
   thumbnailUrl?: string;
   chromaSettings?: ChromaKeySettings;
@@ -94,6 +97,9 @@ export interface BackingBeat {
   duration: number;
   synthStyle: 'trap808' | 'boombap' | 'reggaeton' | 'synthpop' | 'drill' | 'rock';
   audioUrl?: string;
+  isCustom?: boolean;
+  fileName?: string;
+  fileSize?: number;
 }
 
 export interface Project {

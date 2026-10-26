@@ -85,7 +85,10 @@ export class MultitrackExportEngine {
     }
 
     const recordedChunks: Blob[] = [];
-    const recorder = mimeType ? new MediaRecorder(combinedStream, { mimeType }) : new MediaRecorder(combinedStream);
+    const targetBitrate = options.resolution === '1080p' ? 12_000_000 : options.resolution === '720p' ? 6_000_000 : 3_000_000;
+    const recorder = mimeType
+      ? new MediaRecorder(combinedStream, { mimeType, videoBitsPerSecond: targetBitrate })
+      : new MediaRecorder(combinedStream);
 
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
